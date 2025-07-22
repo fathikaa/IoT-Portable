@@ -1,0 +1,190 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <ModbusMaster.h>
+#include <ArduinoJson.h>
+
+// === 1) KONFIGURASI WI-FI & API ===
+const char* ssid       = "(SSID WiFi)";
+const char* password   = "(Pass WiFi)";
+const char* serverUrl  = "https://nurturagrow.site/api/data-sensor";
+
+// ID penanaman & nama sensor untuk payload
+const int   ID_PENANAMAN = 1;
+const char* namaSensor   = "A4";
+
+// === 2) Inisialisasi LCD I2C 20×4 ===
+LiquidCrystal_I2C lcd(0x27, 20, 4);
+
+// === 3) Inisialisasi ModbusMaster (RS-485→TTL) ===
+#define RX_PIN 16  
+#define TX_PIN 17  
+ModbusMaster node;
+
+// === 4) Variabel sensor ===
+float suhu         = 0.0;
+float kelembapan   = 0.0;
+float konduktivitas= 0.0;
+float ph           = 0.0;
+int nitrogen       = 0;
+int phospor        = 0;
+int kalium         = 0;
+
+// === 5) Waktu pembacaan berkala ===
+unsigned long lastReadTime   = 0;
+const unsigned long interval = 7200000;  // tiap 2 jam
+
+void setup() {
+  Serial.begin(115200);
+
+  // –– Setup Modbus via Serial1 (RX=16, TX=17) ––
+  Serial1.begin(9600, SERIAL_8N1, RX_PIN, TX_PIN);
+  node.begin(1, Serial1);
+
+  // –– Setup LCD ––
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("Sensor 7in1");
+  delay(1000);
+  lcd.clear();
+
+  // –– Connect Wi-Fi ––
+  lcd.setCursor(0,0);
+  lcd.print("WiFi connecting");
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    lcd.print(".");
+  }
+  lcd.clear();
+  lcd.print("WiFi OK!");
+  delay(500);
+}
+
+// Membaca semua register sekaligus dan langsung tampilkan di LCD
+// 6) Fungsi baca sensor
+void readSensorData() {
+  uint8_t result;
+
+  // pH @ 0x0006
+  result = node.readHoldingRegisters(0x0006, 1);
+  if (result == node.ku8MBSuccess) {
+    ph = node.getResponseBuffer(0) * 0.01;
+  } else {
+    Serial.print("Gagal pH, kode "); Serial.println(result);
+  }
+
+  // Kelembapan @ 0x0012
+  result = node.readHoldingRegisters(0x0012, 1);
+  if (result == node.ku8MBSuccess) {
+    kelembapan = node.getResponseBuffer(0) * 0.1;
+  } else {
+    Serial.print("Gagal kelembapan, kode "); Serial.println(result);
+  }
+
+  // Suhu @ 0x0013
+  result = node.readHoldingRegisters(0x0013, 1);
+  if (result == node.ku8MBSuccess) {
+    suhu = node.getResponseBuffer(0) * 0.1;
+  } else {
+    Serial.print("Gagal suhu, kode "); Serial.println(result);
+  }
+
+  // Konduktivitas @ 0x0015
+  result = node.readHoldingRegisters(0x0015, 1);
+  if (result == node.ku8MBSuccess) {
+    konduktivitas = node.getResponseBuffer(0);
+  } else {
+    Serial.print("Gagal Kond, kode "); Serial.println(result);
+  }
+
+  // Nitrogen @ 0x001E
+  result = node.readHoldingRegisters(0x001E, 1);
+  if (result == node.ku8MBSuccess) {
+    nitrogen = node.getResponseBuffer(0);
+  } else {
+    Serial.print("Gagal N, kode "); Serial.println(result);
+  }
+
+  // Phospor @ 0x001F
+  result = node.readHoldingRegisters(0x001F, 1);
+  if (result == node.ku8MBSuccess) {
+    phospor = node.getResponseBuffer(0);
+  } else {
+    Serial.print("Gagal P, kode "); Serial.println(result);
+  }
+
+  // Kalium @ 0x0020
+  result = node.readHoldingRegisters(0x0020, 1);
+  if (result == node.ku8MBSuccess) {
+    kalium = node.getResponseBuffer(0);
+  } else {
+    Serial.print("Gagal K, kode "); Serial.println(result);
+  }
+}
+
+// 7) Tampilkan hasil di LCD
+void displaySensorData() {
+  lcd.clear();
+  // Baris 1
+  lcd.setCursor(0,0);
+  lcd.printf("T:%.1fC M:%.1f%%", suhu, kelembapan);
+  // Baris 2
+  lcd.setCursor(0,1);
+  lcd.printf("Kond:%u pH:%.2f", (uint16_t)konduktivitas, ph);
+  // Baris 3
+  lcd.setCursor(0,2);
+  lcd.printf("N:%d P:%d K:%d", nitrogen, phospor, kalium);
+  // Baris 4
+  lcd.setCursor(0,3);
+  lcd.print(namaSensor);
+}
+
+// 8) Kirim JSON ke server & tampil status
+bool sendDataToServer() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  StaticJsonDocument<256> doc;
+  doc["id_penanaman"]  = ID_PENANAMAN;
+  doc["nama_sensor"]   = namaSensor;
+  doc["suhu"]          = suhu;
+  doc["kelembapan"]    = kelembapan;
+  doc["konduktivitas"] = konduktivitas;
+  doc["ph"]            = ph;
+  doc["nitrogen"]      = nitrogen;
+  doc["phospor"]       = phospor;
+  doc["kalium"]        = kalium;
+
+  String payload;
+  serializeJson(doc, payload);
+  Serial.println("POST: " + payload);
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  http.begin(client, serverUrl);
+  http.addHeader("Content-Type","application/json");
+  int code = http.POST(payload);
+  String resp = http.getString();
+  http.end();
+
+  Serial.printf("HTTP %d: %s\n", code, resp.c_str());
+
+  // status di pojok kanan bawah LCD
+  lcd.setCursor(18,3);
+  lcd.print((code>=200 && code<300) ? "OK" : "ERR");
+  return (code>=200 && code<300);
+}
+
+void loop() {
+  if (millis() - lastReadTime >= interval) {
+    lastReadTime = millis();
+    readSensorData();       // baca semua
+    displaySensorData();    // tampilkan 4 baris
+    sendDataToServer();     // kirim & update status
+  }
+}

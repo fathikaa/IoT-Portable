@@ -1,0 +1,68 @@
+#!/home/pi/myenv/bin/python
+import cv2, requests, time, sys
+from datetime import datetime
+
+# ======= CONFIG =======
+RTSP_URL   = "rtsp://admin1:admin1@192.168.3.37:554/stream1"
+API_UPLOAD = "https://nurturagrow.site/api/gambar-tangkapan"
+INTERVAL   = 7200    # detik
+# ======================
+
+def capture_frame(cap):
+    if not cap.isOpened():
+        cap.open(RTSP_URL)
+        time.sleep(0.5)
+    ret, frame = cap.read()
+    if not ret:
+        print("[WARN] Gagal membaca frame, retry…", file=sys.stderr)
+    return frame if ret else None
+
+def upload_image(frame):
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"capture_{ts}.jpg"
+    print(f"[INFO] Encoding frame {filename}…")
+    ok, buf = cv2.imencode('.jpg', frame)
+    if not ok:
+        print("[ERROR] Gagal encode frame", file=sys.stderr)
+        return
+
+    files = {
+        'image': (filename, buf.tobytes(), 'image/jpeg')
+    }
+
+    print(f"[INFO] Uploading {filename} to {API_UPLOAD}…")
+    try:
+        r = requests.post(API_UPLOAD, files=files, timeout=15)
+    except Exception as e:
+        print(f"[ERROR] Exception saat upload: {e}", file=sys.stderr)
+        return
+
+    print(f"[INFO] Response status: {r.status_code}")
+    print(f"[INFO] Response body: {r.text}")
+
+    if not r.ok:
+        print(f"[ERROR] Upload failed with {r.status_code}", file=sys.stderr)
+    else:
+        print(f"[SUCCESS] Uploaded {filename}")
+
+def main():
+    gst = (
+    f'rtspsrc location="{RTSP_URL}" protocols=4 latency=200 ! '
+    'rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! appsink'
+    )
+    cap = cv2.VideoCapture(gst, cv2.CAP_GSTREAMER)
+
+    print(f"[INFO] Starting capture loop, interval {INTERVAL}s")
+    try:
+        while True:
+            frame = capture_frame(cap)
+            if frame is not None:
+                upload_image(frame)
+            time.sleep(INTERVAL)
+    except KeyboardInterrupt:
+        print("\n[INFO] Stopped by user")
+    finally:
+        cap.release()
+
+if _name_ == "_main_":
+    main()
